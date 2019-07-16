@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nuid"
 )
 
 // More advanced tests on subscriptions
@@ -95,7 +96,7 @@ func TestClientSyncAutoUnsub(t *testing.T) {
 		_, err := sub.NextMsg(10 * time.Millisecond)
 		if err != nil {
 			if err != nats.ErrMaxMessages {
-				t.Fatalf("Expected '%v', but got: '%v'\n", nats.ErrBadSubscription, err.Error())
+				t.Fatalf("Expected '%v', but got: '%v'\n", nats.ErrMaxMessages, err.Error())
 			}
 			break
 		}
@@ -770,6 +771,22 @@ func TestNextMsgCallOnClosedSub(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected an error calling NextMsg() on closed subscription")
 	} else if err != nats.ErrBadSubscription {
+		t.Fatalf("Expected '%v', but got: '%v'", nats.ErrBadSubscription, err.Error())
+	}
+
+	sub, err = nc.SubscribeSync("foo")
+	if err != nil {
+		t.Fatal("Failed to subscribe: ", err)
+	}
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		sub.Unsubscribe()
+		wg.Done()
+	}()
+
+	if _, err := sub.NextMsg(time.Second); err == nil || err != nats.ErrBadSubscription {
 		t.Fatalf("Expected '%v', but got: '%v'", nats.ErrBadSubscription, err.Error())
 	}
 }
@@ -1495,5 +1512,37 @@ func TestSubscriptionTypes(t *testing.T) {
 	if _, _, err := sub.PendingLimits(); err == nil {
 		t.Fatalf("We should NOT be able to call PendingLimits() on ChanSubscriber")
 	}
+}
 
+func TestAutoUnsubOnSyncSubCanStillRespond(t *testing.T) {
+	s := RunDefaultServer()
+	defer s.Shutdown()
+
+	nc := NewDefaultConnection(t)
+	defer nc.Close()
+
+	subj := nuid.Next()
+	sub, err := nc.SubscribeSync(subj)
+	if err != nil {
+		t.Fatalf("Error susbscribing: %v", err)
+	}
+	// When the single message is delivered, the
+	// auto unsub will reap the subscription removing
+	// the connection, make sure Respond still works.
+	if err := sub.AutoUnsubscribe(1); err != nil {
+		t.Fatalf("Error autounsub: %v", err)
+	}
+
+	inbox := nats.NewInbox()
+	if err = nc.PublishRequest(subj, inbox, nil); err != nil {
+		t.Fatalf("Error making request: %v", err)
+	}
+
+	m, err := sub.NextMsg(time.Second)
+	if err != nil {
+		t.Fatalf("Error getting next message")
+	}
+	if err := m.Respond(nil); err != nil {
+		t.Fatalf("Error responding: %v", err)
+	}
 }

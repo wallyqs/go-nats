@@ -18,6 +18,7 @@ package test
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1039,4 +1040,47 @@ func TestFlushWithContext(t *testing.T) {
 	if err := nc.FlushWithContext(dctx); err != context.DeadlineExceeded {
 		t.Fatalf("Expected '%v', got '%v'", context.DeadlineExceeded, err)
 	}
+}
+
+func TestUnsubscribeAndNextMsgWithContext(t *testing.T) {
+	s := RunDefaultServer()
+	defer s.Shutdown()
+
+	nc := NewDefaultConnection(t)
+	defer nc.Close()
+
+	ctx, cancelCB := context.WithCancel(context.Background())
+	defer cancelCB() // should always be called, not discarded, to prevent context leak
+
+	sub, err := nc.SubscribeSync("foo")
+	if err != nil {
+		t.Fatalf("Expected to be able to subscribe: %s", err)
+	}
+	sub.Unsubscribe()
+	if _, err = sub.NextMsgWithContext(ctx); err != nats.ErrBadSubscription {
+		t.Fatalf("Expected '%v', but got: '%v'", nats.ErrBadSubscription, err)
+	}
+
+	ctx, cancelCB = context.WithCancel(context.Background())
+	defer cancelCB() // should always be called, not discarded, to prevent context leak
+
+	sub, err = nc.SubscribeSync("foo")
+	if err != nil {
+		t.Fatalf("Expected to be able to subscribe: %s", err)
+	}
+
+	// Now make sure we get same error when unsubscribing from separate routine
+	// while in the call.
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		sub.Unsubscribe()
+		wg.Done()
+	}()
+
+	if _, err = sub.NextMsgWithContext(ctx); err != nats.ErrBadSubscription {
+		t.Fatalf("Expected '%v', but got: '%v'", nats.ErrBadSubscription, err)
+	}
+	wg.Wait()
 }

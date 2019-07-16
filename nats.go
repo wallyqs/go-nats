@@ -166,7 +166,8 @@ type UserJWTHandler func() (string, error)
 
 // SignatureHandler is used to sign a nonce from the server while
 // authenticating with nkeys. The user should sign the nonce and
-// return the base64 encoded signature.
+// return the raw signature. The client will base64 encode this to
+// send to the server.
 type SignatureHandler func([]byte) ([]byte, error)
 
 // AuthTokenHandler is used to generate a new token.
@@ -2903,7 +2904,6 @@ func (nc *Conn) removeSub(s *Subscription) {
 	s.mch = nil
 
 	// Mark as invalid
-	s.conn = nil
 	s.closed = true
 	if s.pCond != nil {
 		s.pCond.Broadcast()
@@ -2940,7 +2940,7 @@ func (s *Subscription) IsValid() bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.conn != nil
+	return s.conn != nil && !s.closed
 }
 
 // Drain will remove interest but continue callbacks until all messages
@@ -2965,8 +2965,12 @@ func (s *Subscription) Unsubscribe() error {
 	}
 	s.mu.Lock()
 	conn := s.conn
+	closed := s.closed
 	s.mu.Unlock()
-	if conn == nil {
+	if conn == nil || conn.IsClosed() {
+		return ErrConnectionClosed
+	}
+	if closed {
 		return ErrBadSubscription
 	}
 	if conn.IsDraining() {
@@ -3022,8 +3026,9 @@ func (s *Subscription) AutoUnsubscribe(max int) error {
 	}
 	s.mu.Lock()
 	conn := s.conn
+	closed := s.closed
 	s.mu.Unlock()
-	if conn == nil {
+	if conn == nil || closed {
 		return ErrBadSubscription
 	}
 	return conn.unsubscribe(s, max, false)
@@ -3095,7 +3100,7 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 	select {
 	case msg, ok = <-mch:
 		if !ok {
-			return nil, ErrConnectionClosed
+			return nil, s.getNextMsgErr()
 		}
 		if err := s.processNextMsgDelivered(msg); err != nil {
 			return nil, err
@@ -3114,7 +3119,7 @@ func (s *Subscription) NextMsg(timeout time.Duration) (*Msg, error) {
 	select {
 	case msg, ok = <-mch:
 		if !ok {
-			return nil, ErrConnectionClosed
+			return nil, s.getNextMsgErr()
 		}
 		if err := s.processNextMsgDelivered(msg); err != nil {
 			return nil, err
@@ -3149,6 +3154,18 @@ func (s *Subscription) validateNextMsgState() error {
 	}
 
 	return nil
+}
+
+// This is called when the sync channel has been closed.
+// The error returned will be either connection or subscription
+// closed depending on what caused NextMsg() to fail.
+func (s *Subscription) getNextMsgErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.connClosed {
+		return ErrConnectionClosed
+	}
+	return ErrBadSubscription
 }
 
 // processNextMsgDelivered takes a message and applies the needed
@@ -3198,7 +3215,7 @@ func (s *Subscription) Pending() (int, int, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conn == nil {
+	if s.conn == nil || s.closed {
 		return -1, -1, ErrBadSubscription
 	}
 	if s.typ == ChanSubscription {
@@ -3214,7 +3231,7 @@ func (s *Subscription) MaxPending() (int, int, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conn == nil {
+	if s.conn == nil || s.closed {
 		return -1, -1, ErrBadSubscription
 	}
 	if s.typ == ChanSubscription {
@@ -3230,7 +3247,7 @@ func (s *Subscription) ClearMaxPending() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conn == nil {
+	if s.conn == nil || s.closed {
 		return ErrBadSubscription
 	}
 	if s.typ == ChanSubscription {
@@ -3255,7 +3272,7 @@ func (s *Subscription) PendingLimits() (int, int, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conn == nil {
+	if s.conn == nil || s.closed {
 		return -1, -1, ErrBadSubscription
 	}
 	if s.typ == ChanSubscription {
@@ -3272,7 +3289,7 @@ func (s *Subscription) SetPendingLimits(msgLimit, bytesLimit int) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conn == nil {
+	if s.conn == nil || s.closed {
 		return ErrBadSubscription
 	}
 	if s.typ == ChanSubscription {
@@ -3292,7 +3309,7 @@ func (s *Subscription) Delivered() (int64, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conn == nil {
+	if s.conn == nil || s.closed {
 		return -1, ErrBadSubscription
 	}
 	return int64(s.delivered), nil
@@ -3308,7 +3325,7 @@ func (s *Subscription) Dropped() (int, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conn == nil {
+	if s.conn == nil || s.closed {
 		return -1, ErrBadSubscription
 	}
 	return s.dropped, nil
